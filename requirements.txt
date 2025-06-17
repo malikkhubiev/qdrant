@@ -1,0 +1,6 @@
+fastapi==0.109.1
+uvicorn==0.27.0
+qdrant-client==1.8.2  # Обновленная стабильная версия
+sentence-transformers==2.7.0
+python-dotenv==1.0.1
+openai
