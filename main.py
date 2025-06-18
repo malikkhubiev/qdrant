@@ -72,14 +72,45 @@ class VoiceResponse(BaseModel):
 
 # Утилиты для работы с SIPuni API
 async def sipuni_api_request(endpoint: str, data: dict):
-    """Отправка запроса к API SIPuni"""
+    """Улучшенный запрос к SIPuni API с обработкой ошибок"""
     url = f"https://sipuni.com/api{endpoint}"
     data['secret'] = SIPUNI_API_KEY
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
     
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=data, headers=headers) as response:
-            return await response.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json=data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                # Проверяем Content-Type
+                content_type = response.headers.get('Content-Type', '')
+                if 'application/json' not in content_type:
+                    text = await response.text()
+                    if "login" in text:
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Invalid SIPuni API key or SIP ID"
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"SIPuni returned HTML: {text[:200]}..."
+                        )
+                
+                return await response.json()
+                
+    except Exception as e:
+        logger.error(f"SIPuni API error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"SIPuni API request failed: {str(e)}"
+        )
 
 # API для тестового звонка
 @app.post("/initiate_test_call")
