@@ -4,7 +4,7 @@ import json
 import uuid
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Dict, Optional
 import openai
@@ -13,7 +13,14 @@ import base64
 import time
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -25,6 +32,12 @@ YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 BASE_URL = os.getenv("BASE_URL")  # Адрес вашего сервера
+
+# Логирование конфигурации
+logger.info(f"Starting application with configuration:")
+logger.info(f"SIPUNI_SIP_ID: {SIPUNI_SIP_ID}")
+logger.info(f"BASE_URL: {BASE_URL}")
+logger.info(f"YANDEX_FOLDER_ID: {YANDEX_FOLDER_ID}")
 
 # Фиксированные тестовые данные
 FIXED_RESPONSE = [
@@ -70,6 +83,23 @@ class VoiceResponse(BaseModel):
     call_id: str
     text: str
 
+# Root endpoint
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Root endpoint that shows the service is working"""
+    logger.info("Accessed root endpoint")
+    return """
+    <html>
+        <head>
+            <title>Call Center AI Service</title>
+        </head>
+        <body>
+            <h1>Call Center AI Service is working correctly!</h1>
+            <p>All systems operational.</p>
+        </body>
+    </html>
+    """
+
 # Утилиты для работы с SIPuni API
 async def sipuni_api_request(endpoint: str, data: dict):
     """Улучшенный запрос к SIPuni API с обработкой ошибок"""
@@ -80,6 +110,7 @@ async def sipuni_api_request(endpoint: str, data: dict):
         "Accept": "application/json"
     }
     
+    logger.info(f"Making SIPuni API request to {endpoint}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -92,6 +123,7 @@ async def sipuni_api_request(endpoint: str, data: dict):
                 content_type = response.headers.get('Content-Type', '')
                 if 'application/json' not in content_type:
                     text = await response.text()
+                    logger.error(f"Non-JSON response from SIPuni: {text[:200]}")
                     if "login" in text:
                         raise HTTPException(
                             status_code=401,
@@ -103,7 +135,9 @@ async def sipuni_api_request(endpoint: str, data: dict):
                             detail=f"SIPuni returned HTML: {text[:200]}..."
                         )
                 
-                return await response.json()
+                response_data = await response.json()
+                logger.debug(f"SIPuni API response: {response_data}")
+                return response_data
                 
     except Exception as e:
         logger.error(f"SIPuni API error: {str(e)}")
@@ -116,6 +150,7 @@ async def sipuni_api_request(endpoint: str, data: dict):
 @app.post("/initiate_test_call")
 async def initiate_test_call():
     """Инициирует тестовый звонок на ваш номер"""
+    logger.info("Initiating test call")
     try:
         call_id = str(uuid.uuid4())
         active_calls[call_id] = CallState()
@@ -134,46 +169,57 @@ async def initiate_test_call():
         )
         
         if response.get("result") != "success":
+            logger.error(f"SIPuni call failed: {response}")
             raise HTTPException(status_code=500, detail="SIPuni call failed")
         
+        logger.info(f"Call initiated successfully, call_id: {call_id}")
         return {"status": "call_initiated", "call_id": call_id}
     except Exception as e:
-        logger.error(f"Call initiation error: {str(e)}")
+        logger.error(f"Call initiation error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 # Вебхук для событий SIPuni
 @app.post("/sipuni_events")
 async def sipuni_events(request: Request):
     """Обрабатывает события от SIPuni API"""
-    data = await request.json()
-    call_id = data.get("custom_data")
-    
-    if not call_id or call_id not in active_calls:
-        return JSONResponse(content={"status": "unknown_call"})
-    
-    state = active_calls[call_id]
-    
-    if data.get("status") == "answered":
-        # Вызов ответлен
-        logger.info(f"Call answered: {call_id}")
-        state.recognition_active = True
+    try:
+        data = await request.json()
+        logger.info(f"Received SIPuni event: {data}")
+        call_id = data.get("custom_data")
         
-    elif data.get("record_url"):
-        # Доступна запись аудио
-        await process_audio_fragment(call_id, data["record_url"])
-    
-    elif data.get("status") in ("finished", "failed"):
-        # Звонок завершен
-        logger.info(f"Call ended: {call_id}")
-        if call_id in active_calls:
-            del active_calls[call_id]
-    
-    return JSONResponse(content={"status": "processed"})
+        if not call_id or call_id not in active_calls:
+            logger.warning(f"Unknown call_id in SIPuni event: {call_id}")
+            return JSONResponse(content={"status": "unknown_call"})
+        
+        state = active_calls[call_id]
+        
+        if data.get("status") == "answered":
+            # Вызов ответлен
+            logger.info(f"Call answered: {call_id}")
+            state.recognition_active = True
+            
+        elif data.get("record_url"):
+            # Доступна запись аудио
+            logger.info(f"Received audio record URL for call {call_id}")
+            await process_audio_fragment(call_id, data["record_url"])
+        
+        elif data.get("status") in ("finished", "failed"):
+            # Звонок завершен
+            logger.info(f"Call ended: {call_id}, status: {data.get('status')}")
+            if call_id in active_calls:
+                del active_calls[call_id]
+        
+        return JSONResponse(content={"status": "processed"})
+    except Exception as e:
+        logger.error(f"Error processing SIPuni event: {str(e)}", exc_info=True)
+        return JSONResponse(content={"status": "error"}, status_code=500)
 
 # Обработка аудио
 async def process_audio_fragment(call_id: str, audio_url: str):
     """Обрабатывает аудиофрагмент"""
+    logger.info(f"Processing audio fragment for call {call_id}")
     if call_id not in active_calls:
+        logger.warning(f"Call {call_id} not found in active calls")
         return
     
     state = active_calls[call_id]
@@ -183,17 +229,20 @@ async def process_audio_fragment(call_id: str, audio_url: str):
         async with aiohttp.ClientSession() as session:
             async with session.get(audio_url) as resp:
                 audio_data = await resp.read()
+                logger.debug(f"Downloaded audio fragment, size: {len(audio_data)} bytes")
         
         # Распознаем через Yandex SpeechKit
         text = await speech_to_text(audio_data)
+        logger.info(f"Recognized text: {text}")
         state.current_question = text
         await handle_question(call_id)
         
     except Exception as e:
-        logger.error(f"Audio processing error: {str(e)}")
+        logger.error(f"Audio processing error: {str(e)}", exc_info=True)
 
 async def speech_to_text(audio_data: bytes) -> str:
     """Конвертирует аудио в текст с помощью Yandex SpeechKit"""
+    logger.info("Starting speech to text conversion")
     try:
         async with aiohttp.ClientSession() as session:
             headers = {
@@ -207,14 +256,17 @@ async def speech_to_text(audio_data: bytes) -> str:
                 data=audio_data
             ) as response:
                 result = await response.json()
+                logger.info(f"Speech recognition result: {result}")
                 return result.get("result", "")
     except Exception as e:
-        logger.error(f"Speech recognition error: {str(e)}")
+        logger.error(f"Speech recognition error: {str(e)}", exc_info=True)
         return ""
 
 async def handle_question(call_id: str):
     """Обрабатывает вопрос и генерирует ответ"""
+    logger.info(f"Handling question for call {call_id}")
     if call_id not in active_calls:
+        logger.warning(f"Call {call_id} not found when handling question")
         return
     
     state = active_calls[call_id]
@@ -236,6 +288,7 @@ async def handle_question(call_id: str):
         Сформируй краткий дружелюбный ответ на русском без технических деталей.
         """
         
+        logger.info(f"Sending prompt to DeepSeek: {prompt[:200]}...")
         response = openai.ChatCompletion.create(
             api_key=DEEPSEEK_API_KEY,
             base_url="https://api.deepseek.com/v1",
@@ -245,6 +298,7 @@ async def handle_question(call_id: str):
         )
         
         answer_text = response.choices[0].message.content
+        logger.info(f"Received answer from DeepSeek: {answer_text}")
         state.dialog_history.append(f"Клиент: {state.current_question}")
         state.dialog_history.append(f"Бот: {answer_text}")
         
@@ -253,7 +307,7 @@ async def handle_question(call_id: str):
         await sipuni_play_audio(call_id, audio_url)
         
     except Exception as e:
-        logger.error(f"Response generation error: {str(e)}")
+        logger.error(f"Response generation error: {str(e)}", exc_info=True)
         error_audio = await text_to_speech("Извините, произошла ошибка.")
         await sipuni_play_audio(call_id, error_audio)
     finally:
@@ -261,6 +315,7 @@ async def handle_question(call_id: str):
 
 async def text_to_speech(text: str) -> str:
     """Конвертирует текст в аудио с помощью Yandex SpeechKit"""
+    logger.info(f"Converting text to speech: {text[:50]}...")
     try:
         async with aiohttp.ClientSession() as session:
             headers = {
@@ -283,19 +338,23 @@ async def text_to_speech(text: str) -> str:
                 if response.status == 200:
                     filename = f"tts_{uuid.uuid4()}.ogg"
                     with open(filename, "wb") as f:
-                        f.write(await response.read())
+                        audio_data = await response.read()
+                        f.write(audio_data)
+                    logger.info(f"Audio file saved: {filename}, size: {len(audio_data)} bytes")
                     return f"{BASE_URL}/audio/{filename}"
                 else:
                     error = await response.text()
                     logger.error(f"TTS error: {error}")
                     return ""
     except Exception as e:
-        logger.error(f"TTS request error: {str(e)}")
+        logger.error(f"TTS request error: {str(e)}", exc_info=True)
         return ""
 
 async def sipuni_play_audio(call_id: str, audio_url: str):
     """Воспроизводит аудио через SIPuni API"""
+    logger.info(f"Playing audio for call {call_id}, URL: {audio_url}")
     if call_id not in active_calls:
+        logger.warning(f"Call {call_id} not found when trying to play audio")
         return
     
     try:
@@ -307,10 +366,12 @@ async def sipuni_play_audio(call_id: str, audio_url: str):
                 "silence_detect": True
             }
         )
+        logger.info("Audio play request sent to SIPuni")
     except Exception as e:
-        logger.error(f"SIPuni play audio error: {str(e)}")
+        logger.error(f"SIPuni play audio error: {str(e)}", exc_info=True)
 
 # Запуск сервера
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info("Starting Uvicorn server")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
