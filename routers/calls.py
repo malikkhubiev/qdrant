@@ -2,29 +2,23 @@ from fastapi import APIRouter, HTTPException
 from models.schemas import CallRequest, CallResponse
 from services.sipuni import SIPuniService
 from models.state import CallManager
-import uuid
-import logging
 
 router = APIRouter()
 call_manager = CallManager()
-logger = logging.getLogger(__name__)
 
 @router.post("/initiate", response_model=CallResponse)
-async def initiate_call(request: CallRequest):
+def initiate_call(request: CallRequest):
     call_id = call_manager.create_call()
-    
     try:
-        result = await SIPuniService.initiate_call(
+        result = SIPuniService.initiate_call(
             phone=request.phone_number,
             call_id=call_id
         )
-        
         if result.get("result") != "success":
             raise HTTPException(
                 status_code=400,
                 detail=result.get("message", "Call failed")
             )
-            
         return CallResponse(
             call_id=call_id,
             status="initiated",

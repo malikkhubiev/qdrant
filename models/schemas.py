@@ -1,15 +1,18 @@
-from pydantic import BaseModel
+from dataclasses import dataclass
 from typing import Optional
 
-class CallRequest(BaseModel):
+@dataclass
+class CallRequest:
     phone_number: str
     caller_id: Optional[str] = "AI Assistant"
 
-class CallResponse(BaseModel):
+@dataclass
+class CallResponse:
     call_id: str
     status: str
     message: Optional[str] = None
 
-class VoiceResponse(BaseModel):
+@dataclass
+class VoiceResponse:
     call_id: str
     text: str
