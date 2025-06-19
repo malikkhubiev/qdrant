@@ -10,12 +10,16 @@ class SIPuniService:
     def make_request(endpoint: str, payload: dict):
         url = f"https://sipuni.com/api{endpoint}"
         payload['secret'] = settings.SIPUNI_API_KEY
+        logger.info(f"SIPuni request URL: {url}")
+        logger.info(f"SIPuni request payload: {payload}")
         try:
             response = requests.post(
                 url,
                 json=payload,
                 timeout=30
             )
+            logger.info(f"SIPuni response status: {response.status_code}")
+            logger.info(f"SIPuni response text: {response.text}")
             if response.status_code != 200:
                 error = response.text
                 logger.error(f"SIPuni error: {error}")
@@ -23,7 +27,14 @@ class SIPuniService:
                     status_code=502,
                     detail=f"SIPuni API error: {error}"
                 )
-            return response.json()
+            try:
+                return response.json()
+            except Exception as e:
+                logger.error(f"SIPuni response not JSON: {response.text}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"SIPuni returned non-JSON: {response.text}"
+                )
         except Exception as e:
             logger.error(f"SIPuni request failed: {str(e)}")
             raise HTTPException(
